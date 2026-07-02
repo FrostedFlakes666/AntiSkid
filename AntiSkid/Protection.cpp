@@ -10,172 +10,205 @@
 #include <cstring>
 #include <cwchar>
 #include <intrin.h>
+#include <memory>
 
-bool IsDebugger()
-{
-    if (IsDebuggerPresent())
-        return true;
+namespace AntiDebug {
+    // Debugger detection methods
+    class DebuggerDetector {
+    public:
+        static bool IsDebuggerPresent() {
+            if (::IsDebuggerPresent())
+                return true;
 
-    BOOL remote = FALSE;
-    CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote);
+            BOOL remote = FALSE;
+            CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote);
+            return remote != FALSE;
+        }
 
-    return remote;
-}
-
-bool CheckPEB()
-{
+        static bool CheckPEB() {
 #ifdef _M_X64
-    PBYTE peb = (PBYTE)__readgsqword(0x60);
+            PBYTE peb = (PBYTE)__readgsqword(0x60);
 #else
-    PBYTE peb = (PBYTE)__readfsdword(0x30);
+            PBYTE peb = (PBYTE)__readfsdword(0x30);
 #endif
+            return (peb[2] != 0);
+        }
 
-    return (peb[2] != 0);
-}
+        static bool CheckDebuggerProcesses() {
+            const std::vector<std::wstring> debuggerProcesses = {
+                L"ollydbg.exe", L"x64dbg.exe", L"ida.exe",
+                L"ida64.exe", L"dnspy.exe", L"processhacker.exe",
+                L"cheatengine.exe", L"windbg.exe", L"x32dbg.exe"
+            };
 
-bool CheckProcesses()
-{
-    std::vector<std::wstring> bad = {
-        L"ollydbg.exe", L"x64dbg.exe", L"ida.exe",
-        L"ida64.exe", L"dnspy.exe", L"processhacker.exe"
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap == INVALID_HANDLE_VALUE)
+                return false;
+
+            std::unique_ptr<void, decltype(&CloseHandle)> snapGuard(snap, CloseHandle);
+            
+            PROCESSENTRY32W pe{};
+            pe.dwSize = sizeof(PROCESSENTRY32W);
+
+            if (!Process32FirstW(snap, &pe))
+                return false;
+
+            do {
+                for (const auto& process : debuggerProcesses) {
+                    if (_wcsicmp(pe.szExeFile, process.c_str()) == 0) {
+                        return true;
+                    }
+                }
+            } while (Process32NextW(snap, &pe));
+
+            return false;
+        }
+
+        static int GetDebugScore() {
+            int score = 0;
+            if (IsDebuggerPresent()) score += 3;
+            if (CheckPEB()) score += 2;
+            if (CheckDebuggerProcesses()) score += 3;
+            return score;
+        }
     };
 
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE)
-        return false;
+    // Virtual Machine detection methods
+    class VMDetector {
+    private:
+        static std::string GetCPUVendor() {
+            int cpuInfo[4] = { 0 };
+            char vendor[13] = { 0 };
 
-    PROCESSENTRY32W pe{};
-    pe.dwSize = sizeof(PROCESSENTRY32W);
+            __cpuid(cpuInfo, 0x40000000);
 
-    if (Process32FirstW(snap, &pe))
-    {
-        do
-        {
-            for (const auto& b : bad)
-            {
-                if (_wcsicmp(pe.szExeFile, b.c_str()) == 0)
-                {
-                    CloseHandle(snap);
+            memcpy(vendor, &cpuInfo[1], 4);
+            memcpy(vendor + 4, &cpuInfo[2], 4);
+            memcpy(vendor + 8, &cpuInfo[3], 4);
+
+            return std::string(vendor);
+        }
+
+        static bool CheckRegistryValue(HKEY hKey, const std::wstring& subKey, 
+                                       const std::wstring& valueName, 
+                                       const std::vector<std::wstring>& keywords) {
+            HKEY hSubKey;
+            if (RegOpenKeyExW(hKey, subKey.c_str(), 0, KEY_READ, &hSubKey) != ERROR_SUCCESS)
+                return false;
+
+            std::unique_ptr<void, decltype(&RegCloseKey)> keyGuard(hSubKey, RegCloseKey);
+
+            WCHAR buffer[512] = { 0 };
+            DWORD size = sizeof(buffer);
+            
+            if (RegQueryValueExW(hSubKey, valueName.c_str(), NULL, NULL, 
+                                (LPBYTE)buffer, &size) != ERROR_SUCCESS)
+                return false;
+
+            std::wstring value(buffer);
+            for (const auto& keyword : keywords) {
+                if (value.find(keyword) != std::wstring::npos)
                     return true;
-                }
             }
 
-        } while (Process32NextW(snap, &pe));
-    }
+            return false;
+        }
 
-    CloseHandle(snap);
-    return false;
-}
+    public:
+        static bool CheckVendor() {
+            std::string vendor = GetCPUVendor();
+            const std::vector<std::string> vmKeywords = {
+                "VMware", "VBox", "KVM", "Microsoft Virtual PC", "Xen"
+            };
 
-bool CheckVM_Vendor()
-{
-    int cpuInfo[4] = { 0 };
-    char vendor[13] = { 0 };
+            for (const auto& keyword : vmKeywords) {
+                if (vendor.find(keyword) != std::string::npos)
+                    return true;
+            }
+            return false;
+        }
 
-    __cpuid(cpuInfo, 0x40000000);
+        static bool CheckRegistry() {
+            const std::vector<std::wstring> vmKeywords = {
+                L"VMware", L"VirtualBox", L"KVM", L"Xen", L"QEMU"
+            };
 
-    memcpy(vendor, &cpuInfo[1], 4);
-    memcpy(vendor + 4, &cpuInfo[2], 4);
-    memcpy(vendor + 8, &cpuInfo[3], 4);
-
-    std::string v(vendor);
-
-    if (v.find("VMware") != std::string::npos)
-        return true;
-
-    if (v.find("VBox") != std::string::npos)
-        return true;
-
-    if (v.find("KVM") != std::string::npos)
-        return true;
-
-   
-    return false;
-}
-
-bool CheckVM_Registry()
-{
-    HKEY hKey;
-
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-        L"HARDWARE\\DESCRIPTION\\System\\BIOS",
-        0, KEY_READ, &hKey) == ERROR_SUCCESS)
-    {
-        WCHAR buffer[256];
-        DWORD size = sizeof(buffer);
-
-        if (RegQueryValueExW(hKey, L"SystemManufacturer", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS)
-        {
-            std::wstring val(buffer);
-
-            if (val.find(L"VMware") != std::wstring::npos ||
-                val.find(L"VirtualBox") != std::wstring::npos)
-            {
-                RegCloseKey(hKey);
+            // Check BIOS manufacturer
+            if (CheckRegistryValue(HKEY_LOCAL_MACHINE, 
+                                  L"HARDWARE\\DESCRIPTION\\System\\BIOS",
+                                  L"SystemManufacturer", vmKeywords))
                 return true;
-            }
-        }
 
-        size = sizeof(buffer);
-        if (RegQueryValueExW(hKey, L"SystemProductName", NULL, NULL, (LPBYTE)buffer, &size) == ERROR_SUCCESS)
-        {
-            std::wstring val(buffer);
-
-            if (val.find(L"VMware") != std::wstring::npos ||
-                val.find(L"VirtualBox") != std::wstring::npos ||
-                val.find(L"KVM") != std::wstring::npos)
-            {
-                RegCloseKey(hKey);
+            // Check BIOS product name
+            if (CheckRegistryValue(HKEY_LOCAL_MACHINE,
+                                  L"HARDWARE\\DESCRIPTION\\System\\BIOS",
+                                  L"SystemProductName", vmKeywords))
                 return true;
+
+            // Additional registry checks
+            if (CheckRegistryValue(HKEY_LOCAL_MACHINE,
+                                  L"SYSTEM\\CurrentControlSet\\Control\\SystemInformation",
+                                  L"SystemManufacturer", vmKeywords))
+                return true;
+
+            return false;
+        }
+
+        static bool CheckFiles() {
+            const std::vector<std::string> vmFiles = {
+                "C:\\Windows\\System32\\drivers\\vmmouse.sys",
+                "C:\\Windows\\System32\\drivers\\VBoxMouse.sys",
+                "C:\\Windows\\System32\\drivers\\VBoxGuest.sys",
+                "C:\\Windows\\System32\\drivers\\vmhgfs.sys",
+                "C:\\Windows\\System32\\drivers\\vm3dmp.sys"
+            };
+
+            for (const auto& file : vmFiles) {
+                if (GetFileAttributesA(file.c_str()) != INVALID_FILE_ATTRIBUTES)
+                    return true;
+            }
+            return false;
+        }
+
+        static int GetVMScore() {
+            int score = 0;
+            if (CheckVendor()) score++;
+            if (CheckRegistry()) score++;
+            if (CheckFiles()) score++;
+            return score;
+        }
+    };
+
+    // Protection response handler
+    class ProtectionResponse {
+    public:
+        static void Trigger() {
+            // Clean exit to prevent debugging
+            ExitProcess(0);
+        }
+    };
+
+    // Main protection orchestrator
+    class ProtectionOrchestrator {
+    private:
+        static constexpr int DEBUG_THRESHOLD = 3;
+        static constexpr int VM_THRESHOLD = 2;
+
+    public:
+        static void Execute() {
+            int debugScore = DebuggerDetector::GetDebugScore();
+            int vmScore = VMDetector::GetVMScore();
+
+            if (debugScore >= DEBUG_THRESHOLD || vmScore >= VM_THRESHOLD) {
+                ProtectionResponse::Trigger();
             }
         }
-
-        RegCloseKey(hKey);
-    }
-
-    return false;
+    };
 }
 
-bool CheckVM_Files()
-{
-    if (GetFileAttributesA("C:\\Windows\\System32\\drivers\\vmmouse.sys") != INVALID_FILE_ATTRIBUTES)
-        return true;
-
-    if (GetFileAttributesA("C:\\Windows\\System32\\drivers\\VBoxMouse.sys") != INVALID_FILE_ATTRIBUTES)
-        return true;
-
-    return false;
-}
-
-
-void TriggerResponse()
-{
-    ExitProcess(0);
-}
-
-
-
-extern "C"
-{
-    __declspec(dllexport) void __cdecl RunProtection()
-    {
-        int debugScore = 0;
-        int vmScore = 0;
-
-        
-        if (IsDebugger()) debugScore += 3;
-        if (CheckPEB()) debugScore += 2;
-        if (CheckProcesses()) debugScore += 3;
-
-        
-        if (CheckVM_Vendor()) vmScore++;
-        if (CheckVM_Registry()) vmScore++;
-        if (CheckVM_Files()) vmScore++;
-
-        
-        if (debugScore >= 3 || vmScore >= 2)
-        {
-            TriggerResponse();
-        }
+// Exported function for external use
+extern "C" {
+    __declspec(dllexport) void __cdecl RunProtection() {
+        AntiDebug::ProtectionOrchestrator::Execute();
     }
 }
