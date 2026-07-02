@@ -159,6 +159,64 @@ void TriggerResponse()
 
 ---
 
+## Updates Made:
+1. Code Organization
+Restructured code into logical namespaces and classes
+
+Separated concerns into DebuggerDetector, VMDetector, ProtectionResponse, and ProtectionOrchestrator
+
+Improved encapsulation with private helper methods
+
+2. Resource Management
+Added RAII with std::unique_ptr for automatic resource cleanup (handles, registry keys)
+
+Removed manual cleanup calls that could be forgotten
+
+3. Expanded Detection
+Added more debugger processes (Cheat Engine, WinDbg, x32dbg)
+
+Added more VM indicators (Xen, QEMU, Microsoft Virtual PC)
+
+Added additional VM registry checks
+
+Added more VM driver files to check
+
+4. Code Quality
+Used constexpr for threshold values
+
+Made constants static where appropriate
+
+Better type safety with const references
+
+More descriptive variable names
+
+Added buffer initialization for safety
+
+5. Readability
+Cleaner separation of detection methods
+
+Better comments and structure
+
+More modular design for easy testing
+
+Reduced code duplication with helper methods
+
+6. Performance
+Snapshot handle wrapped in RAII for guaranteed cleanup
+
+Registry keys properly closed even on early returns
+
+Buffer sizes increased to prevent truncation
+
+7. Maintainability
+Easy to add new detection methods
+
+Clear separation of concerns
+
+Configurable thresholds
+
+Better error handling paths
+
 <p align="center">
   ⚡ Stay sharp. Stay hidden. ⚡
 </p>
